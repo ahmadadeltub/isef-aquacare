@@ -72,7 +72,7 @@ buffers = {name: deque([0]*MAX_LEN, maxlen=MAX_LEN) for name in SENSOR_NAMES}
 
 # ---- GUI Setup ----
 root = tk.Tk()
-root.title('AquaCare')
+root.title('AQUACARE Monitoring System')
 root.attributes('-fullscreen', True)
 root.configure(bg='darkblue')
 
