@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import smbus
+import time
+import glob
+import sys
+import tkinter as tk
+from tkinter import ttk
+from collections import deque
+
+import matplotlib
+matplotlib.use('TkAgg')
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+# ---- PCF8591 I2C ADC Setup ----
+I2C_BUS, PCF_ADDR, CTRL_BASE = 1, 0x48, 0x40
+try:
+    bus = smbus.SMBus(I2C_BUS)
+except Exception as e:
+    print(f"ERROR: Cannot open I2C bus {I2C_BUS}: {e}")
+    sys.exit(1)
+
+def read_adc_raw(ch):
+    bus.write_byte(PCF_ADDR, CTRL_BASE | (ch & 3))
+    bus.read_byte(PCF_ADDR)
+    return bus.read_byte(PCF_ADDR)
+
+def raw_to_volt(raw, vref=3.3):
+    return (raw/255.0)*vref
+
+# Calibration placeholders
+def volt_to_conduct(v): return v*1000.0
+def volt_to_ph(v):      return -5.7*v+21.0
+def volt_to_turb(v):    return -1120.4*v+5742.3
+def volt_to_tds(v):     return v*500.0
+
+ANALOG_NAMES = ("Conductivity","pH","Turbidity","TDS")
+ANALOG_FUNCS = (volt_to_conduct,volt_to_ph,volt_to_turb,volt_to_tds)
+ANALOG_UNITS = ("uS/cm","pH","NTU","ppm")
+
+# ---- DS18B20 1-Wire Setup ----
+BASE_DIR = "/sys/bus/w1/devices/"
+def find_temp_device():
+    devs = glob.glob(BASE_DIR+"28*")
+    return devs[0]+"/w1_slave" if devs else None
+
+def read_temp_c(devfile):
+    while True:
+        lines = open(devfile).read().splitlines()
+        if lines[0].endswith('YES'): break
+        time.sleep(0.2)
+    pos = lines[1].find('t=')
+    return float(lines[1][pos+2:])/1000.0
+
+temp_device = find_temp_device()
+if not temp_device:
+    print(f"ERROR: No DS18B20 under {BASE_DIR}")
+    sys.exit(1)
+
+# ---- Data Buffers ----
+MAX_LEN = 80
+BUFFER_NAMES = list(ANALOG_NAMES) + ['Water Temp']
+BUFFER_UNITS = list(ANALOG_UNITS) + ['C']
+buffers = {name: deque([0]*MAX_LEN, maxlen=MAX_LEN) for name in BUFFER_NAMES}
+
+# ---- GUI Setup ----
+root = tk.Tk()
+root.title('AquaCare')
+root.attributes('-fullscreen', True)
+root.configure(bg='darkblue')
+root.grid_rowconfigure(0, weight=0)
+root.grid_rowconfigure(1, weight=0)
+root.grid_rowconfigure(2, weight=1)
+root.grid_rowconfigure(3, weight=0)
+root.grid_columnconfigure(0, weight=1)
+
+style = ttk.Style(root)
+style.theme_use('clam')
+style.configure('TFrame', background='darkblue')
+style.configure('TLabel', background='darkblue', foreground='white', font=('Arial',12))
+style.configure('Title.TLabel', font=('Arial',14,'bold'))
+
+# Title
+ttk.Label(root, text='AquaCare', style='Title.TLabel').grid(row=0, column=0, pady=5)
+
+# Data display
+data_frame = ttk.Frame(root, style='TFrame')
+data_frame.grid(row=1, column=0, pady=5)
+display_vars = {}
+for i, name in enumerate(BUFFER_NAMES):
+    ttk.Label(data_frame, text=f"{name}:", style='Title.TLabel').grid(row=i, column=0, sticky='e', padx=5)
+    lbl = ttk.Label(data_frame, text='---', style='TLabel')
+    lbl.grid(row=i, column=1, sticky='w', padx=5)
+    display_vars[name] = lbl
+
+# Buttons
+btn_frame = ttk.Frame(root, style='TFrame')
+btn_frame.grid(row=3, column=0, pady=5)
+def reset_vals():
+    for name in BUFFER_NAMES:
+        display_vars[name].config(text='---')
+    for buf in buffers.values():
+        buf.clear(); buf.extend([0]*MAX_LEN)
+
+tk.Button(btn_frame, text='Reset',  bg='green', fg='black', font=('Arial',10), width=8,
+          command=reset_vals).pack(side='left', padx=5)
+tk.Button(btn_frame, text='Exit',   bg='red',   fg='white', font=('Arial',10), width=8,
+          command=root.destroy).pack(side='left', padx=5)
+
+# Graphs (3x2)
+graph_frame = ttk.Frame(root, style='TFrame')
+graph_frame.grid(row=2, column=0, sticky='nsew', padx=5)
+fig = Figure(figsize=(4,6), dpi=80)
+axes, lines = {}, {}
+rows, cols = 3, 2
+for idx,name in enumerate(BUFFER_NAMES):
+    ax = fig.add_subplot(rows, cols, idx+1)
+    unit = BUFFER_UNITS[idx]
+    ax.set_title(f"{name} ({unit})", fontsize=10)
+    ax.tick_params(labelsize=8)
+    line, = ax.plot(range(MAX_LEN), list(buffers[name]))
+    axes[name], lines[name] = ax, line
+for idx in range(len(BUFFER_NAMES)+1, rows*cols+1):
+    fig.add_subplot(rows, cols, idx).axis('off')
+fig.tight_layout(pad=1.0)
+canvas = FigureCanvasTkAgg(fig, master=graph_frame)
+canvas.get_tk_widget().pack(fill='both', expand=True)
+
+# Update loop
+def update():
+    for ch,name in enumerate(ANALOG_NAMES):
+        val = ANALOG_FUNCS[ch](raw_to_volt(read_adc_raw(ch)))
+        buffers[name].append(val)
+        display_vars[name].config(text=f"{val:.2f} {ANALOG_UNITS[ch]}")
+    t = read_temp_c(temp_device)
+    buffers['Water Temp'].append(t)
+    display_vars['Water Temp'].config(text=f"{t:.2f} C")
+    for name,line in lines.items():
+        line.set_ydata(buffers[name])
+        axes[name].relim(); axes[name].autoscale_view()
+    canvas.draw()
+    root.after(1000, update)
+
+root.after(500, update)
+root.mainloop()
