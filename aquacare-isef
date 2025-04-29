@@ -8,13 +8,14 @@ import sys
 import tkinter as tk
 from tkinter import ttk
 from collections import deque
+from gpiozero import DigitalInputDevice
 
 import matplotlib
 matplotlib.use('TkAgg')
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-# ---- PCF8591 I2C ADC Setup ----
+# ---- PCF8591 ADC setup ----
 I2C_BUS, PCF_ADDR, CTRL_BASE = 1, 0x48, 0x40
 try:
     bus = smbus.SMBus(I2C_BUS)
@@ -28,52 +29,56 @@ def read_adc_raw(ch):
     return bus.read_byte(PCF_ADDR)
 
 def raw_to_volt(raw, vref=3.3):
-    return (raw/255.0)*vref
+    return (raw / 255.0) * vref
 
 # Calibration placeholders
-def volt_to_conduct(v): return v*1000.0
-def volt_to_ph(v):      return -5.7*v+21.0
-def volt_to_turb(v):    return -1120.4*v+5742.3
-def volt_to_tds(v):     return v*500.0
+ANALOG_NAMES = ("Conductivity", "pH", "Turbidity", "TDS")
+def volt_to_conduct(v): return v * 1000.0
+def volt_to_ph(v):      return -5.7 * v + 21.0
+def volt_to_turb(v):    return -1120.4 * v + 5742.3
+def volt_to_tds(v):     return v * 500.0
+ANALOG_FUNCS = (volt_to_conduct, volt_to_ph, volt_to_turb, volt_to_tds)
+ANALOG_UNITS = ("uS/cm", "pH", "NTU", "ppm")
 
-ANALOG_NAMES = ("Conductivity","pH","Turbidity","TDS")
-ANALOG_FUNCS = (volt_to_conduct,volt_to_ph,volt_to_turb,volt_to_tds)
-ANALOG_UNITS = ("uS/cm","pH","NTU","ppm")
-
-# ---- DS18B20 1-Wire Setup ----
+# ---- DS18B20 1-Wire setup ----
 BASE_DIR = "/sys/bus/w1/devices/"
 def find_temp_device():
-    devs = glob.glob(BASE_DIR+"28*")
-    return devs[0]+"/w1_slave" if devs else None
+    devs = glob.glob(BASE_DIR + "28*")
+    return devs[0] + "/w1_slave" if devs else None
 
 def read_temp_c(devfile):
     while True:
         lines = open(devfile).read().splitlines()
-        if lines[0].endswith('YES'): break
+        if lines[0].endswith("YES"):
+            break
         time.sleep(0.2)
     pos = lines[1].find('t=')
-    return float(lines[1][pos+2:])/1000.0
+    return float(lines[1][pos+2:]) / 1000.0
 
-temp_device = find_temp_device()
-if not temp_device:
-    print(f"ERROR: No DS18B20 under {BASE_DIR}")
+temp_dev = find_temp_device()
+if not temp_dev:
+    print("ERROR: No DS18B20 device found.")
     sys.exit(1)
+
+# ---- Water-level sensor via gpiozero ----
+# pull_up=True: pin HIGH when dry, LOW when water present
+water_level = DigitalInputDevice(8, pull_up=True)
 
 # ---- Data Buffers ----
 MAX_LEN = 100
-BUFFER_NAMES = list(ANALOG_NAMES) + ['Water Temp']
-BUFFER_UNITS = list(ANALOG_UNITS) + ['C']
-buffers = {name: deque([0]*MAX_LEN, maxlen=MAX_LEN) for name in BUFFER_NAMES}
+SENSOR_NAMES = list(ANALOG_NAMES) + ['Water Temp', 'Water Level']
+SENSOR_UNITS = list(ANALOG_UNITS) + ['C', 'State']
+buffers = {name: deque([0]*MAX_LEN, maxlen=MAX_LEN) for name in SENSOR_NAMES}
 
 # ---- GUI Setup ----
 root = tk.Tk()
 root.title('AquaCare')
 root.attributes('-fullscreen', True)
 root.configure(bg='darkblue')
-root.grid_rowconfigure(0, weight=0)
-root.grid_rowconfigure(1, weight=0)
-root.grid_rowconfigure(2, weight=1)
-root.grid_rowconfigure(3, weight=0)
+
+# Configure grid
+for r in range(4):
+    root.grid_rowconfigure(r, weight=(1 if r == 2 else 0))
 root.grid_columnconfigure(0, weight=1)
 
 style = ttk.Style(root)
@@ -83,31 +88,39 @@ style.configure('TLabel', background='darkblue', foreground='white', font=('Aria
 style.configure('Title.TLabel', font=('Arial',14,'bold'))
 
 # Title
-ttk.Label(root, text='AquaCare', style='Title.TLabel').grid(row=0, column=0, pady=5)
+label_title = ttk.Label(root, text='AquaCare', style='Title.TLabel')
+label_title.grid(row=0, column=0, pady=5)
 
 # Data display
-data_frame = ttk.Frame(root, style='TFrame')
-data_frame.grid(row=1, column=0, pady=5)
+df = ttk.Frame(root, style='TFrame')
+df.grid(row=1, column=0, pady=5)
 display_vars = {}
-for i, name in enumerate(BUFFER_NAMES):
-    ttk.Label(data_frame, text=f"{name}:", style='Title.TLabel').grid(row=i, column=0, sticky='e', padx=5)
-    lbl = ttk.Label(data_frame, text='---', style='TLabel')
-    lbl.grid(row=i, column=1, sticky='w', padx=5)
-    display_vars[name] = lbl
+for i, name in enumerate(SENSOR_NAMES[:-1]):  # exclude Water Level label handled separately
+    lbl_name = ttk.Label(df, text=name + ':', style='Title.TLabel')
+    lbl_name.grid(row=i, column=0, sticky='e', padx=5)
+    lbl_val = ttk.Label(df, text='---', style='TLabel')
+    lbl_val.grid(row=i, column=1, sticky='w', padx=5)
+    display_vars[name] = lbl_val
+# Water Level label
+df_label = ttk.Label(df, text='Water Level: ---', style='Title.TLabel')
+df_label.grid(row=len(SENSOR_NAMES)-1, column=0, columnspan=2, pady=5)
 
 # Buttons
 btn_frame = ttk.Frame(root, style='TFrame')
 btn_frame.grid(row=3, column=0, pady=5)
 def reset_vals():
-    for name in BUFFER_NAMES:
+    for name in SENSOR_NAMES[:-1]:
         display_vars[name].config(text='---')
+    df_label.config(text='Water Level: ---')
     for buf in buffers.values():
         buf.clear(); buf.extend([0]*MAX_LEN)
 
-tk.Button(btn_frame, text='Reset',  bg='green', fg='white', font=('Arial',10), width=8,
-          command=reset_vals).pack(side='left', padx=5)
-tk.Button(btn_frame, text='Exit',   bg='red',   fg='white', font=('Arial',10), width=8,
-          command=root.destroy).pack(side='left', padx=5)
+btn_reset = tk.Button(btn_frame, text='Reset', bg='green', fg='white', font=('Arial',10), width=8,
+                      command=reset_vals)
+btn_reset.pack(side='left', padx=5)
+btn_exit = tk.Button(btn_frame, text='Exit', bg='red', fg='white', font=('Arial',10), width=8,
+                      command=root.destroy)
+btn_exit.pack(side='left', padx=5)
 
 # Graphs (3x2)
 graph_frame = ttk.Frame(root, style='TFrame')
@@ -115,14 +128,15 @@ graph_frame.grid(row=2, column=0, sticky='nsew', padx=5)
 fig = Figure(figsize=(4,6), dpi=80)
 axes, lines = {}, {}
 rows, cols = 3, 2
-for idx,name in enumerate(BUFFER_NAMES):
+for idx, name in enumerate(SENSOR_NAMES):
     ax = fig.add_subplot(rows, cols, idx+1)
-    unit = BUFFER_UNITS[idx]
+    unit = SENSOR_UNITS[idx]
     ax.set_title(f"{name} ({unit})", fontsize=10)
     ax.tick_params(labelsize=8)
     line, = ax.plot(range(MAX_LEN), list(buffers[name]))
     axes[name], lines[name] = ax, line
-for idx in range(len(BUFFER_NAMES)+1, rows*cols+1):
+# Hide any unused subplots
+for idx in range(len(SENSOR_NAMES)+1, rows*cols+1):
     fig.add_subplot(rows, cols, idx).axis('off')
 fig.tight_layout(pad=1.0)
 canvas = FigureCanvasTkAgg(fig, master=graph_frame)
@@ -130,14 +144,27 @@ canvas.get_tk_widget().pack(fill='both', expand=True)
 
 # Update loop
 def update():
-    for ch,name in enumerate(ANALOG_NAMES):
-        val = ANALOG_FUNCS[ch](raw_to_volt(read_adc_raw(ch)))
+    # analog sensors
+    for ch, name in enumerate(ANALOG_NAMES):
+        raw = read_adc_raw(ch)
+        val = ANALOG_FUNCS[ch](raw_to_volt(raw))
         buffers[name].append(val)
         display_vars[name].config(text=f"{val:.2f} {ANALOG_UNITS[ch]}")
-    t = read_temp_c(temp_device)
-    buffers['Water Temp'].append(t)
-    display_vars['Water Temp'].config(text=f"{t:.2f} C")
-    for name,line in lines.items():
+    # temperature
+    temp = read_temp_c(temp_dev)
+    buffers['Water Temp'].append(temp)
+    display_vars['Water Temp'].config(text=f"{temp:.2f} C")
+    # water level
+    if water_level.is_active:
+        text = 'Flood Detected'
+        state = 1
+    else:
+        text = 'No Flood Detected!'
+        state = 0
+    buffers['Water Level'].append(state)
+    df_label.config(text=f"Water Level: {text}")
+    # update graphs
+    for name, line in lines.items():
         line.set_ydata(buffers[name])
         axes[name].relim(); axes[name].autoscale_view()
     canvas.draw()
