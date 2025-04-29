@@ -9,6 +9,7 @@ import tkinter as tk
 from tkinter import ttk
 from collections import deque
 from gpiozero import DigitalInputDevice
+import subprocess                    # ← added for alert sound
 
 import matplotlib
 matplotlib.use('TkAgg')
@@ -63,6 +64,7 @@ if not temp_dev:
 # ---- Water-level sensor via gpiozero ----
 # pull_up=True: pin HIGH when dry, LOW when water present
 water_level = DigitalInputDevice(8, pull_up=True)
+prev_state = 0                  # ← added to track transitions
 
 # ---- Data Buffers ----
 MAX_LEN = 100
@@ -95,7 +97,7 @@ label_title.grid(row=0, column=0, pady=5)
 df = ttk.Frame(root, style='TFrame')
 df.grid(row=1, column=0, pady=5)
 display_vars = {}
-for i, name in enumerate(SENSOR_NAMES[:-1]):  # exclude Water Level label handled separately
+for i, name in enumerate(SENSOR_NAMES[:-1]):  # exclude Water Level
     lbl_name = ttk.Label(df, text=name + ':', style='Title.TLabel')
     lbl_name.grid(row=i, column=0, sticky='e', padx=5)
     lbl_val = ttk.Label(df, text='---', style='TLabel')
@@ -144,6 +146,7 @@ canvas.get_tk_widget().pack(fill='both', expand=True)
 
 # Update loop
 def update():
+    global prev_state
     # analog sensors
     for ch, name in enumerate(ANALOG_NAMES):
         raw = read_adc_raw(ch)
@@ -163,6 +166,10 @@ def update():
         state = 0
     buffers['Water Level'].append(state)
     df_label.config(text=f"Water Level: {text}")
+    # ▶️ Play alert once on new flood
+    if state == 1 and prev_state == 0:
+        subprocess.Popen(['aplay', 'alert.wav'])
+    prev_state = state
     # update graphs
     for name, line in lines.items():
         line.set_ydata(buffers[name])
