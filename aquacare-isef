@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-#final code 
+# AquaCare Dashboard without water-level sensor
+
 import smbus
 import time
 import glob
@@ -8,8 +9,6 @@ import sys
 import tkinter as tk
 from tkinter import ttk
 from collections import deque
-from gpiozero import DigitalInputDevice
-import subprocess                    # ? added for alert sound
 
 import matplotlib
 matplotlib.use('TkAgg')
@@ -61,25 +60,18 @@ if not temp_dev:
     print("ERROR: No DS18B20 device found.")
     sys.exit(1)
 
-
-# ---- Water-level sensor via gpiozero ----
-# pull_up=True: pin HIGH when dry, LOW when water present
-water_level = DigitalInputDevice(8, pull_up=True)
-prev_state = 0                  # ? added to track transitions
-
 # ---- Data Buffers ----
 MAX_LEN = 100
-SENSOR_NAMES = list(ANALOG_NAMES) + ['Water Temp', 'Water Flood']
-SENSOR_UNITS = list(ANALOG_UNITS) + ['C', 'State']
-buffers = {name: deque([0]*MAX_LEN, maxlen=MAX_LEN) for name in SENSOR_NAMES}
+BUFFER_NAMES = list(ANALOG_NAMES) + ['Water Temp']
+BUFFER_UNITS = list(ANALOG_UNITS) + ['C']
+buffers = {name: deque([0]*MAX_LEN, maxlen=MAX_LEN) for name in BUFFER_NAMES}
 
-# ---- GUI Setup ----
+# ---- GUI Setup ----n
 root = tk.Tk()
 root.title('AQUACARE Monitoring System')
 root.attributes('-fullscreen', True)
 root.configure(bg='darkblue')
-
-# Configure grid
+# Configure grid rows: title(0), data(1), graphs(2), buttons(3)
 for r in range(4):
     root.grid_rowconfigure(r, weight=(1 if r == 2 else 0))
 root.grid_columnconfigure(0, weight=1)
@@ -91,31 +83,24 @@ style.configure('TLabel', background='darkblue', foreground='white', font=('Aria
 style.configure('Title.TLabel', font=('Arial',14,'bold'))
 
 # Title
-label_title = ttk.Label(root, text='AQUACARE Monitoring System', style='Title.TLabel')
-label_title.grid(row=0, column=0, pady=5)
+ttk.Label(root, text='AQUACARE Monitoring System', style='Title.TLabel').grid(row=0, column=0, pady=5)
 
 # Data display
 df = ttk.Frame(root, style='TFrame')
 df.grid(row=1, column=0, pady=5)
 display_vars = {}
-for i, name in enumerate(SENSOR_NAMES[:-1]):  # exclude Water Level
-    lbl_name = ttk.Label(df, text=name + ':', style='Title.TLabel')
-    lbl_name.grid(row=i, column=0, sticky='e', padx=5)
-    lbl_val = ttk.Label(df, text='---', style='TLabel')
-    lbl_val.grid(row=i, column=1, sticky='w', padx=5)
-    display_vars[name] = lbl_val
-# Water Level label
-df_label = ttk.Label(df, text='Water Flood: ---', style='Title.TLabel')
-df_label.grid(row=len(SENSOR_NAMES)-1, column=0, columnspan=2, pady=5)
-
+for i, name in enumerate(BUFFER_NAMES):
+    ttk.Label(df, text=f"{name}:", style='Title.TLabel').grid(row=i, column=0, sticky='e', padx=5)
+    lbl = ttk.Label(df, text='---', style='TLabel')
+    lbl.grid(row=i, column=1, sticky='w', padx=5)
+    display_vars[name] = lbl
 
 # Buttons
 btn_frame = ttk.Frame(root, style='TFrame')
 btn_frame.grid(row=3, column=0, pady=5)
 def reset_vals():
-    for name in SENSOR_NAMES[:-1]:
+    for name in BUFFER_NAMES:
         display_vars[name].config(text='---')
-    df_label.config(text='Water Level: ---')
     for buf in buffers.values():
         buf.clear(); buf.extend([0]*MAX_LEN)
 
@@ -132,15 +117,14 @@ graph_frame.grid(row=2, column=0, sticky='nsew', padx=5)
 fig = Figure(figsize=(4,6), dpi=80)
 axes, lines = {}, {}
 rows, cols = 3, 2
-for idx, name in enumerate(SENSOR_NAMES):
+for idx, name in enumerate(BUFFER_NAMES):
     ax = fig.add_subplot(rows, cols, idx+1)
-    unit = SENSOR_UNITS[idx]
-    ax.set_title(f"{name} ({unit})", fontsize=10)
+    ax.set_title(f"{name} ({BUFFER_UNITS[idx]})", fontsize=10)
     ax.tick_params(labelsize=8)
     line, = ax.plot(range(MAX_LEN), list(buffers[name]))
     axes[name], lines[name] = ax, line
-# Hide any unused subplots
-for idx in range(len(SENSOR_NAMES)+1, rows*cols+1):
+# Hide unused subplots
+for idx in range(len(BUFFER_NAMES)+1, rows*cols+1):
     fig.add_subplot(rows, cols, idx).axis('off')
 fig.tight_layout(pad=1.0)
 canvas = FigureCanvasTkAgg(fig, master=graph_frame)
@@ -148,7 +132,6 @@ canvas.get_tk_widget().pack(fill='both', expand=True)
 
 # Update loop
 def update():
-    global prev_state
     # analog sensors
     for ch, name in enumerate(ANALOG_NAMES):
         raw = read_adc_raw(ch)
@@ -159,19 +142,6 @@ def update():
     temp = read_temp_c(temp_dev)
     buffers['Water Temp'].append(temp)
     display_vars['Water Temp'].config(text=f"{temp:.2f} C")
-    # water level
-    if water_level.is_active:
-        text = 'Flood Detected'
-        state = 1
-    else:
-        text = 'No Flood Detected!'
-        state = 0
-    buffers['Water Flood'].append(state)
-    df_label.config(text=f"Water Flood: {text}")
-    # ?? Play alert once on new flood
-    if state == 1 and prev_state == 0:
-        subprocess.Popen(['aplay', 'alert.wav'])
-    prev_state = state
     # update graphs
     for name, line in lines.items():
         line.set_ydata(buffers[name])
@@ -181,4 +151,3 @@ def update():
 
 root.after(500, update)
 root.mainloop()
-
