@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # AquaCare Dashboard without water-level sensor
+# Enlarged charts, status circle under TDS, warning label above circle, charts fill white area
 
 import smbus
 import time
@@ -14,13 +15,23 @@ import matplotlib
 matplotlib.use('TkAgg')
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.patches import Circle
 
-# ---- PCF8591 ADC setup ----
+# Calibration thresholds
+domains = {
+    'Conductivity': (0, 2000),
+    'pH':           (6.5, 8.5),
+    'Turbidity':    (0, 5),
+    'TDS':          (0, 500),
+    'Water Temp':   (0, 35),
+}
+
+# I2C ADC
 I2C_BUS, PCF_ADDR, CTRL_BASE = 1, 0x48, 0x40
 try:
     bus = smbus.SMBus(I2C_BUS)
 except Exception as e:
-    print(f"ERROR: Cannot open I2C bus {I2C_BUS}: {e}")
+    print('I2C OPEN ERROR:', e)
     sys.exit(1)
 
 def read_adc_raw(ch):
@@ -28,28 +39,29 @@ def read_adc_raw(ch):
     bus.read_byte(PCF_ADDR)
     return bus.read_byte(PCF_ADDR)
 
-def raw_to_volt(raw, vref=3.3):
-    return (raw / 255.0) * vref
+def volt(v_raw):
+    return (v_raw * 3.3) / 255.0
 
-# Calibration placeholders
-ANALOG_NAMES = ("Conductivity", "pH", "Turbidity", "TDS")
-def volt_to_conduct(v): return v * 1000.0
-def volt_to_ph(v):      return -5.7 * v + 21.0
-def volt_to_turb(v):    return -1120.4 * v + 5742.3
-def volt_to_tds(v):     return v * 500.0
-ANALOG_FUNCS = (volt_to_conduct, volt_to_ph, volt_to_turb, volt_to_tds)
-ANALOG_UNITS = ("uS/cm", "pH", "NTU", "ppm")
+# Conversion functions
+names = ('Conductivity', 'pH', 'Turbidity', 'TDS')
+funcs = (
+    lambda v: v * 1000.0,
+    lambda v: -5.7 * v + 21.0,
+    lambda v: -1120.4 * v + 5742.3,
+    lambda v: v * 500.0,
+)
+units = ('uS/cm', 'pH', 'NTU', 'ppm')
 
-# ---- DS18B20 1-Wire setup ----
-BASE_DIR = "/sys/bus/w1/devices/"
+# DS18B20
 def find_temp_device():
-    devs = glob.glob(BASE_DIR + "28*")
-    return devs[0] + "/w1_slave" if devs else None
+    base = '/sys/bus/w1/devices/'
+    devs = glob.glob(base + '28*')
+    return devs[0] + '/w1_slave' if devs else None
 
-def read_temp_c(devfile):
+def read_temp(devfile):
     while True:
         lines = open(devfile).read().splitlines()
-        if lines[0].endswith("YES"):
+        if lines[0].endswith('YES'):
             break
         time.sleep(0.2)
     pos = lines[1].find('t=')
@@ -57,40 +69,39 @@ def read_temp_c(devfile):
 
 temp_dev = find_temp_device()
 if not temp_dev:
-    print("ERROR: No DS18B20 device found.")
+    print('TEMP DEVICE NOT FOUND')
     sys.exit(1)
 
-# ---- Data Buffers ----
-MAX_LEN = 100
-BUFFER_NAMES = list(ANALOG_NAMES) + ['Water Temp']
-BUFFER_UNITS = list(ANALOG_UNITS) + ['C']
-buffers = {name: deque([0]*MAX_LEN, maxlen=MAX_LEN) for name in BUFFER_NAMES}
+# Data buffers
+ML = 100
+buffer_names = list(names) + ['Water Temp']
+buffer_units = list(units) + ['C']
+buffers = {n: deque([0] * ML, maxlen=ML) for n in buffer_names}
 
-# ---- GUI Setup ----n
+# GUI setup
 root = tk.Tk()
 root.title('AQUACARE Monitoring System')
 root.attributes('-fullscreen', True)
 root.configure(bg='darkblue')
-# Configure grid rows: title(0), data(1), graphs(2), buttons(3)
-for r in range(4):
-    root.grid_rowconfigure(r, weight=(1 if r == 2 else 0))
+for row in range(4):
+    root.grid_rowconfigure(row, weight=(1 if row == 2 else 0))
 root.grid_columnconfigure(0, weight=1)
 
 style = ttk.Style(root)
 style.theme_use('clam')
 style.configure('TFrame', background='darkblue')
-style.configure('TLabel', background='darkblue', foreground='white', font=('Arial',12))
-style.configure('Title.TLabel', font=('Arial',14,'bold'))
+style.configure('TLabel', background='darkblue', foreground='white')
+style.configure('Title.TLabel', font=('Arial', 14, 'bold'), background='darkblue', foreground='white')
 
-# Title
+# Title label
 ttk.Label(root, text='AQUACARE Monitoring System', style='Title.TLabel').grid(row=0, column=0, pady=5)
 
-# Data display
+# Data labels
 df = ttk.Frame(root, style='TFrame')
 df.grid(row=1, column=0, pady=5)
 display_vars = {}
-for i, name in enumerate(BUFFER_NAMES):
-    ttk.Label(df, text=f"{name}:", style='Title.TLabel').grid(row=i, column=0, sticky='e', padx=5)
+for i, name in enumerate(buffer_names):
+    ttk.Label(df, text=name + ':', style='Title.TLabel').grid(row=i, column=0, sticky='e', padx=5)
     lbl = ttk.Label(df, text='---', style='TLabel')
     lbl.grid(row=i, column=1, sticky='w', padx=5)
     display_vars[name] = lbl
@@ -98,54 +109,65 @@ for i, name in enumerate(BUFFER_NAMES):
 # Buttons
 btn_frame = ttk.Frame(root, style='TFrame')
 btn_frame.grid(row=3, column=0, pady=5)
-def reset_vals():
-    for name in BUFFER_NAMES:
-        display_vars[name].config(text='---')
-    for buf in buffers.values():
-        buf.clear(); buf.extend([0]*MAX_LEN)
+def reset_all():
+    for n in buffer_names:
+        buffers[n].clear(); buffers[n].extend([0]*ML)
+        display_vars[n].config(text='---')
+import tkinter as _tk
+_tk.Button(btn_frame, text='Reset', bg='green', fg='white', font=('Arial',10), width=8, command=reset_all).pack(side='left', padx=5)
+_tk.Button(btn_frame, text='Exit', bg='red', fg='white', font=('Arial',10), width=8, command=root.destroy).pack(side='left', padx=5)
 
-btn_reset = tk.Button(btn_frame, text='Reset', bg='green', fg='white', font=('Arial',10), width=8,
-                      command=reset_vals)
-btn_reset.pack(side='left', padx=5)
-btn_exit = tk.Button(btn_frame, text='Exit', bg='red', fg='white', font=('Arial',10), width=8,
-                      command=root.destroy)
-btn_exit.pack(side='left', padx=5)
-
-# Graphs (3x2)
-graph_frame = ttk.Frame(root, style='TFrame')
-graph_frame.grid(row=2, column=0, sticky='nsew', padx=5)
-fig = Figure(figsize=(4,6), dpi=80)
-axes, lines = {}, {}
+# Charts area
+gf = ttk.Frame(root, style='TFrame')
+gf.grid(row=2, column=0, sticky='nsew', padx=5)
+# White background chart area
+fig = Figure(figsize=(8,9), dpi=100, facecolor='white')
+axes_map, lines_map = {}, {}
 rows, cols = 3, 2
-for idx, name in enumerate(BUFFER_NAMES):
+for idx, name in enumerate(buffer_names):
     ax = fig.add_subplot(rows, cols, idx+1)
-    ax.set_title(f"{name} ({BUFFER_UNITS[idx]})", fontsize=10)
-    ax.tick_params(labelsize=8)
-    line, = ax.plot(range(MAX_LEN), list(buffers[name]))
-    axes[name], lines[name] = ax, line
-# Hide unused subplots
-for idx in range(len(BUFFER_NAMES)+1, rows*cols+1):
-    fig.add_subplot(rows, cols, idx).axis('off')
-fig.tight_layout(pad=1.0)
-canvas = FigureCanvasTkAgg(fig, master=graph_frame)
+    ax.set_facecolor('white')
+    ax.set_title(f"{name} ({buffer_units[idx]})", fontsize=10)
+    ln, = ax.plot(range(ML), list(buffers[name]))
+    axes_map[name], lines_map[name] = ax, ln
+
+# Status cell under TDS (last cell)
+ax_status = fig.add_subplot(rows, cols, rows*cols)
+ax_status.set_facecolor('white')
+ax_status.axis('off')
+# Warning text above circle (top of white cell)
+warn_text = ax_status.text(0.5, 0.95, '', ha='center', va='top', transform=ax_status.transAxes, color='Blue', fontsize=14)
+# Circle indicator
+indicator = Circle((0.5, 0.3), 0.3, transform=ax_status.transAxes, color='green')
+ax_status.add_patch(indicator)
+
+# Adjust margins to show left ticks and warning
+fig.subplots_adjust(left=0.1, right=0.95, top=0.90, bottom=0.05, hspace=0.5, wspace=0.3)
+
+canvas = FigureCanvasTkAgg(fig, master=gf)
 canvas.get_tk_widget().pack(fill='both', expand=True)
 
-# Update loop
+# Update function
 def update():
-    # analog sensors
-    for ch, name in enumerate(ANALOG_NAMES):
-        raw = read_adc_raw(ch)
-        val = ANALOG_FUNCS[ch](raw_to_volt(raw))
+    for idx, name in enumerate(names):
+        raw = read_adc_raw(idx)
+        val = funcs[idx](volt(raw))
         buffers[name].append(val)
-        display_vars[name].config(text=f"{val:.2f} {ANALOG_UNITS[ch]}")
+        display_vars[name].config(text=f"{val:.2f} {units[idx]}")
     # temperature
-    temp = read_temp_c(temp_dev)
-    buffers['Water Temp'].append(temp)
-    display_vars['Water Temp'].config(text=f"{temp:.2f} C")
-    # update graphs
-    for name, line in lines.items():
-        line.set_ydata(buffers[name])
-        axes[name].relim(); axes[name].autoscale_view()
+    temp_val = read_temp(temp_dev)
+    buffers['Water Temp'].append(temp_val)
+    display_vars['Water Temp'].config(text=f"{temp_val:.2f} C")
+    # overall status
+    latest = {n: buffers[n][-1] for n in buffer_names}
+    ok = all(domains[n][0] <= latest[n] <= domains[n][1] for n in buffer_names)
+    indicator.set_color('green' if ok else 'red')
+    warn_text.set_text('Good to drink' if ok else 'Contaminated')
+    # redraw charts
+    for name, ln in lines_map.items():
+        ln.set_ydata(buffers[name])
+        axes_map[name].relim()
+        axes_map[name].autoscale_view()
     canvas.draw()
     root.after(1000, update)
 
