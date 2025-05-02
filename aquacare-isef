@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # AquaCare Dashboard without water-level sensor
 # Enlarged charts, status circle under TDS, warning label above circle, charts fill white area
+# Telegram notifications on start, stop, contamination detection, and periodic readings
 
 import smbus
 import time
@@ -10,12 +11,41 @@ import sys
 import tkinter as tk
 from tkinter import ttk
 from collections import deque
+import urllib.parse
+import urllib.request
 
 import matplotlib
 matplotlib.use('TkAgg')
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.patches import Circle
+
+# Telegram API
+BOT_TOKEN = '6910959309:AAHegNk2gaLf6_4WJHZRJTgSPB3BQC0Z5UE'
+CHAT_ID = '1337613901'
+
+def send_telegram(message):
+    text = urllib.parse.quote(message)
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage?chat_id={CHAT_ID}&text={text}"
+    try:
+        urllib.request.urlopen(url, timeout=5)
+    except Exception as e:
+        print('Telegram send error:', e)
+
+# Send start notification
+def on_start():
+    send_telegram('AquaCare monitoring started')
+
+# Send periodic sensor readings every minute
+def send_readings():
+    readings = []
+    for name in buffer_names:
+        val = buffers[name][-1]
+        unit = buffer_units[buffer_names.index(name)]
+        readings.append(f"{name}: {val:.2f} {unit}")
+    message = 'Readings update:\n' + '\n'.join(readings)
+    send_telegram(message)
+    root.after(60000, send_readings)
 
 # Calibration thresholds
 domains = {
@@ -26,7 +56,7 @@ domains = {
     'Water Temp':   (0, 35),
 }
 
-# I2C ADC
+# I2C ADC setup
 I2C_BUS, PCF_ADDR, CTRL_BASE = 1, 0x48, 0x40
 try:
     bus = smbus.SMBus(I2C_BUS)
@@ -52,7 +82,7 @@ funcs = (
 )
 units = ('uS/cm', 'pH', 'NTU', 'ppm')
 
-# DS18B20
+# DS18B20 setup
 def find_temp_device():
     base = '/sys/bus/w1/devices/'
     devs = glob.glob(base + '28*')
@@ -81,10 +111,15 @@ buffers = {n: deque([0] * ML, maxlen=ML) for n in buffer_names}
 # GUI setup
 root = tk.Tk()
 root.title('AQUACARE Monitoring System')
+# Make window full-screen on startup
 root.attributes('-fullscreen', True)
+# For some platforms, also maximize
+try:
+    root.state('zoomed')
+except:
+    pass
 root.configure(bg='darkblue')
-for row in range(4):
-    root.grid_rowconfigure(row, weight=(1 if row == 2 else 0))
+for row in range(4): root.grid_rowconfigure(row, weight=(1 if row == 2 else 0))
 root.grid_columnconfigure(0, weight=1)
 
 style = ttk.Style(root)
@@ -97,8 +132,7 @@ style.configure('Title.TLabel', font=('Arial', 14, 'bold'), background='darkblue
 ttk.Label(root, text='AQUACARE Monitoring System', style='Title.TLabel').grid(row=0, column=0, pady=5)
 
 # Data labels
-df = ttk.Frame(root, style='TFrame')
-df.grid(row=1, column=0, pady=5)
+df = ttk.Frame(root, style='TFrame'); df.grid(row=1, column=0, pady=5)
 display_vars = {}
 for i, name in enumerate(buffer_names):
     ttk.Label(df, text=name + ':', style='Title.TLabel').grid(row=i, column=0, sticky='e', padx=5)
@@ -106,21 +140,21 @@ for i, name in enumerate(buffer_names):
     lbl.grid(row=i, column=1, sticky='w', padx=5)
     display_vars[name] = lbl
 
-# Buttons
-btn_frame = ttk.Frame(root, style='TFrame')
-btn_frame.grid(row=3, column=0, pady=5)
-def reset_all():
-    for n in buffer_names:
-        buffers[n].clear(); buffers[n].extend([0]*ML)
-        display_vars[n].config(text='---')
+# Buttons and close handling
+def on_close():
+    send_telegram('AquaCare monitoring stopped')
+    root.destroy()
+
+btn_frame = ttk.Frame(root, style='TFrame'); btn_frame.grid(row=3, column=0, pady=5)
 import tkinter as _tk
-_tk.Button(btn_frame, text='Reset', bg='green', fg='white', font=('Arial',10), width=8, command=reset_all).pack(side='left', padx=5)
-_tk.Button(btn_frame, text='Exit', bg='red', fg='white', font=('Arial',10), width=8, command=root.destroy).pack(side='left', padx=5)
+_tk.Button(btn_frame, text='Reset', bg='green', fg='white', font=('Arial',10), width=8,
+           command=lambda: [buffers[n].clear() or buffers[n].extend([0]*ML) or display_vars[n].config(text='---') for n in buffer_names])\
+.pack(side='left', padx=5)
+_tk.Button(btn_frame, text='Exit', bg='red', fg='white', font=('Arial',10), width=8, command=on_close).pack(side='left', padx=5)
+root.protocol('WM_DELETE_WINDOW', on_close)
 
 # Charts area
-gf = ttk.Frame(root, style='TFrame')
-gf.grid(row=2, column=0, sticky='nsew', padx=5)
-# White background chart area
+gf = ttk.Frame(root, style='TFrame'); gf.grid(row=2, column=0, sticky='nsew', padx=5)
 fig = Figure(figsize=(8,9), dpi=100, facecolor='white')
 axes_map, lines_map = {}, {}
 rows, cols = 3, 2
@@ -131,45 +165,45 @@ for idx, name in enumerate(buffer_names):
     ln, = ax.plot(range(ML), list(buffers[name]))
     axes_map[name], lines_map[name] = ax, ln
 
-# Status cell under TDS (last cell)
+# Status cell
 ax_status = fig.add_subplot(rows, cols, rows*cols)
 ax_status.set_facecolor('white')
 ax_status.axis('off')
-# Warning text above circle (top of white cell)
-warn_text = ax_status.text(0.5, 0.95, '', ha='center', va='top', transform=ax_status.transAxes, color='Blue', fontsize=14)
-# Circle indicator
-indicator = Circle((0.5, 0.3), 0.3, transform=ax_status.transAxes, color='green')
+warn_text = ax_status.text(0.5, 0.95, '', ha='center', va='top', transform=ax_status.transAxes,
+                           color='red', fontsize=14)
+indicator = Circle((0.5,0.3), 0.3, transform=ax_status.transAxes, color='green')
 ax_status.add_patch(indicator)
-
-# Adjust margins to show left ticks and warning
 fig.subplots_adjust(left=0.1, right=0.95, top=0.90, bottom=0.05, hspace=0.5, wspace=0.3)
-
 canvas = FigureCanvasTkAgg(fig, master=gf)
 canvas.get_tk_widget().pack(fill='both', expand=True)
 
-# Update function
+# State tracking
+prev_ok = True
+
+# Update loop
 def update():
+    global prev_ok
     for idx, name in enumerate(names):
-        raw = read_adc_raw(idx)
-        val = funcs[idx](volt(raw))
+        val = funcs[idx](volt(read_adc_raw(idx)))
         buffers[name].append(val)
         display_vars[name].config(text=f"{val:.2f} {units[idx]}")
-    # temperature
-    temp_val = read_temp(temp_dev)
-    buffers['Water Temp'].append(temp_val)
-    display_vars['Water Temp'].config(text=f"{temp_val:.2f} C")
-    # overall status
+    tval = read_temp(temp_dev)
+    buffers['Water Temp'].append(tval)
+    display_vars['Water Temp'].config(text=f"{tval:.2f} C")
     latest = {n: buffers[n][-1] for n in buffer_names}
     ok = all(domains[n][0] <= latest[n] <= domains[n][1] for n in buffer_names)
     indicator.set_color('green' if ok else 'red')
     warn_text.set_text('Good to drink' if ok else 'Contaminated')
-    # redraw charts
-    for name, ln in lines_map.items():
-        ln.set_ydata(buffers[name])
-        axes_map[name].relim()
-        axes_map[name].autoscale_view()
+    if not ok and prev_ok:
+        send_telegram('Alert: Water contamination detected!')
+    prev_ok = ok
+    for n, ln in lines_map.items():
+        ln.set_ydata(buffers[n]); axes_map[n].relim(); axes_map[n].autoscale_view()
     canvas.draw()
     root.after(1000, update)
 
+# Kickoff
+on_start()
+root.after(60000, send_readings)
 root.after(500, update)
 root.mainloop()
