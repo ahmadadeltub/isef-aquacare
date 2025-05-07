@@ -185,6 +185,11 @@ def update():
     global prev_ok
     for idx, name in enumerate(names):
         val = funcs[idx](volt(read_adc_raw(idx)))
+     # apply special corrections
+        if name == 'Turbidity':
+            val = val / 1200.0
+        elif name == 'pH':
+            val = val - 5.0
         buffers[name].append(val)
         display_vars[name].config(text=f"{val:.2f} {units[idx]}")
     tval = read_temp(temp_dev)
